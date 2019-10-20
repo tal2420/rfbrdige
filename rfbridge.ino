@@ -28,6 +28,7 @@ const int mqtt_send_wait_interval = 150;
 int mqtt_send_wait_time = mqtt_send_wait_interval;
 
 const char* mqtt_topic_msg_action = "rfbridge/action/msg";
+const char* mqtt_topic_msg_skipped = "rfbridge/action/msg/skipped";
 const char* mqtt_topic_discover_action = "rfbridge/action/discover";
 const char* mqtt_topic_discover = "rfbridge/discover";
 const char* mqtt_topic_list_devices_action = "rfbridge/action/listdevices";
@@ -46,6 +47,11 @@ int pin; // int for Receive pin.
 
 int lastCodeVal = -1;
 long lastCodeTime = -1;
+int lastCodeValExt = -1;
+long lastCodeTimeExt = -1;
+
+long nextDelayOptimizeMillis = 0;
+
 RCSwitch mySwitch = RCSwitch();
 
 long wifiDisconnectedMillis = 0;
@@ -167,6 +173,8 @@ pin = 0;  // for Arduino! Receiver on interrupt 0 => that is pin #2
   //MQTT
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
+
+  nextDelayOptimizeMillis = millis() + random(3000, 10000);
 }
 
 void WIFI_Connect()
@@ -208,7 +216,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.println();
   
-  if(strcmp(topic, mqtt_topic_discover_action) == 0) {
+  if (strcmp(topic, mqtt_topic_msg_action) == 0) {
+    HandleIncomingRfMsg(payload);
+  }
+  else if(strcmp(topic, mqtt_topic_discover_action) == 0) {
     handleDiscoveryRequest(payload);
   }
   else if(strcmp(topic, mqtt_topic_discover) == 0) {
@@ -217,6 +228,75 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if(strcmp(topic, mqtt_topic_list_devices_action) == 0) {
     handleListDeviceRequest(payload);
   }
+}
+
+void HandleIncomingRfMsg(byte* payload) {
+  const size_t capacity = JSON_OBJECT_SIZE(6) + 60;
+  DynamicJsonDocument doc(capacity);
+
+  //const char* json = "{\"code\":12346789,\"bit\":34,\"protocol\":2,\"mac\":\"22:22:22:22\",\"ip\":\"192.1.1.1\",\"delay\":150}";
+
+  deserializeJson(doc, payload);
+
+  long code = doc["code"]; // 12346789
+  //int bit = doc["bit"]; // 34
+  //int protocol = doc["protocol"]; // 2
+  const char* mac = doc["mac"]; // "22:22:22:22"
+  //const char* ip = doc["ip"]; // "192.1.1.1"
+  //int delay = doc["delay"]; // 150
+
+  //if msg id from another device
+  if (strcmp(mac,curMacAddr.c_str())!=0) {
+    int lastCodeValExt = doc["code"];
+    long lastCodeTimeExt = millis();
+  }
+
+
+}
+
+void handlePendingMsg()
+{
+  long now = millis();
+
+  if ((outgoingCodeMsg.sentPending == 1) && (now - outgoingCodeMsg.timeReceived > mqtt_send_wait_time)) {
+    Serial.println("Time to send msg.");
+
+    //check if another device already sent the msg
+    if (lastCodeValExt == outgoingCodeMsg.code.toInt() && lastCodeTimeExt > outgoingCodeMsg.timeReceived) {
+      Serial.println( "msg. already sent by another device, skipping");
+      sendRfMsg(mqtt_topic_msg_skipped);
+    }
+    else {
+      Serial.println( "sending msg.");
+      sendRfMsg(mqtt_topic_msg_action);
+    }
+    
+    Serial.print("Send delay is: ");
+    Serial.println(now - outgoingCodeMsg.timeReceived);
+
+    //client.publish(mqtt_topic_msg_action, outgoingCodeMsg.code.c_str());
+    outgoingCodeMsg.sentPending=0;
+  }
+}
+
+
+void sendRfMsg(const char* curTopic) {
+  //const size_t capacity = JSON_OBJECT_SIZE(6);
+  //DynamicJsonDocument doc(capacity);
+  StaticJsonDocument<150> doc;
+
+  doc["code"] = outgoingCodeMsg.code;
+  doc["bit"] = outgoingCodeMsg.bit;
+  doc["protocol"] = outgoingCodeMsg.protocol;
+  doc["mac"] = curMacAddr;
+  doc["ip"] = curIpAddr;
+  doc["delay"] = mqtt_send_wait_time;
+
+  serializeJson(doc, Serial);
+
+  char output[128];
+  serializeJson(doc, output);
+  client.publish(curTopic, output);
 }
 
 void handleListDeviceRequest(byte* payload) {
@@ -290,15 +370,12 @@ void handleDiscoveryRequest(byte* payload) {
     //if recieved a discovery request from another device
     if (strcmp(action,"Request")==0 && strcmp(requestor_mac,WiFi.macAddress().c_str())!=0) {
       Serial.println("Answering discovery request");
-      sendDiscoveryMsg(requestor_mac);
+      answerDiscoveryMsg(requestor_mac);
     }
   }
 }
 
-void sendDiscoveryMsg(String requestorMac) {
-  // dbg
-  //Serial.println("dbg: sendDiscoveryMsg()");
-
+void answerDiscoveryMsg(String requestorMac) {
   //const size_t capacity = 2*JSON_OBJECT_SIZE(3);
   StaticJsonDocument<300> doc;
   
@@ -314,6 +391,22 @@ void sendDiscoveryMsg(String requestorMac) {
   serializeJson(doc, output);
   
   client.publish(mqtt_topic_discover, output);
+  serializeJson(doc, Serial);
+  Serial.println(output);
+}
+
+void sendDiscoveryRquest() {
+  //const size_t capacity = JSON_OBJECT_SIZE(2);
+  //DynamicJsonDocument doc(capacity);
+  StaticJsonDocument<100> doc;
+
+  doc["action"] = "Request";
+  doc["requestor_mac"] = curMacAddr;
+
+  char output[100];
+  serializeJson(doc, output);
+  
+  client.publish(mqtt_topic_discover_action, output);
   serializeJson(doc, Serial);
   Serial.println(output);
 }
@@ -440,7 +533,7 @@ void reconnect() {
       client.subscribe(mqtt_topic_msg_action);
       client.subscribe(mqtt_topic_discover);
       client.subscribe(mqtt_topic_discover_action);
-      client.subscribe(mqtt_topic_list_devices_action);
+      client.subscribe(mqtt_topic_list_devices);
       client.subscribe(mqtt_topic_list_devices_action);
     } else {
       Serial.print("failed, rc=");
@@ -449,20 +542,6 @@ void reconnect() {
       // Wait 5 seconds before retrying
       delay(5000);
     }
-  }
-}
-
-void sendPendingMsg()
-{
-  long now = millis();
-
-  if ((outgoingCodeMsg.sentPending == 1) && (now - outgoingCodeMsg.timeReceived > mqtt_send_wait_time)) {
-    Serial.println("Sending msg.");
-    Serial.print("Send delay is: ");
-    Serial.println(now - outgoingCodeMsg.timeReceived);
-
-    client.publish(mqtt_topic_msg_action, outgoingCodeMsg.code.c_str());
-    outgoingCodeMsg.sentPending=0;
   }
 }
 
@@ -526,7 +605,7 @@ void loop() {
 
   //handleDiscovery();
   
-  sendPendingMsg();
+  handlePendingMsg();
   //Timers
   long now = millis();
   
@@ -535,6 +614,12 @@ void loop() {
     lastMsg = now;
     ++value;
     sendKeepAliveMsg();
+  }
+  
+  if (now - nextDelayOptimizeMillis > 0)
+  {
+    nextDelayOptimizeMillis = now + 180000;
+    sendDiscoveryRquest();
   }
   
     //Discovery Mode - **not implemented**
