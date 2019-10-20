@@ -27,6 +27,7 @@ const int mqtt_rate_limit_time = 500;
 const int mqtt_send_wait_interval = 150;
 int mqtt_send_wait_time = mqtt_send_wait_interval;
 
+const char* mqtt_topic_msg_action = "rfbridge/action/msg";
 const char* mqtt_topic_discover_action = "rfbridge/action/discover";
 const char* mqtt_topic_discover = "rfbridge/discover";
 const char* mqtt_topic_list_devices_action = "rfbridge/action/listdevices";
@@ -62,9 +63,26 @@ struct rfdevice {
 rfdevice lstRfDevices[10];
 int rfDeviceCount = 0;
 
+struct rfcode {
+  String code;
+  int bit;
+  int protocol;
+  long timeReceived;
+  int sentPending;
+};
+
+//Future implementation
+//rfcode outgoingCodeMsgBuffer[];
+
+rfcode outgoingCodeMsg;
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
+
+  //dbg
+  Serial.print("rfcode sentPending value is: ");
+  Serial.println(outgoingCodeMsg.sentPending);
 
 #ifdef ESP32
 pin = 4;  // for esp32! Receiver on GPIO pin 4. 
@@ -419,6 +437,7 @@ void reconnect() {
       // Once connected, publish an announcement...
       client.publish("rfbridge/status", "Connected to MQTT");
       // ... and resubscribe
+      client.subscribe(mqtt_topic_msg_action);
       client.subscribe(mqtt_topic_discover);
       client.subscribe(mqtt_topic_discover_action);
       client.subscribe(mqtt_topic_list_devices_action);
@@ -430,6 +449,20 @@ void reconnect() {
       // Wait 5 seconds before retrying
       delay(5000);
     }
+  }
+}
+
+void sendPendingMsg()
+{
+  long now = millis();
+
+  if ((outgoingCodeMsg.sentPending == 1) && (now - outgoingCodeMsg.timeReceived > mqtt_send_wait_time)) {
+    Serial.println("Sending msg.");
+    Serial.print("Send delay is: ");
+    Serial.println(now - outgoingCodeMsg.timeReceived);
+
+    client.publish(mqtt_topic_msg_action, outgoingCodeMsg.code.c_str());
+    outgoingCodeMsg.sentPending=0;
   }
 }
 
@@ -451,16 +484,23 @@ void loop() {
       //Serial.println("Skipping sending msg.");
     }
     else {
-      Serial.println("Sending msg.");
-
+      // Create msg object
       char cstr[16];
       itoa(curCodeVal, cstr, 10);
+
+      rfcode curCodeMsg;
+      curCodeMsg.code = cstr;
+      curCodeMsg.bit = mySwitch.getReceivedBitlength();
+      curCodeMsg.protocol = mySwitch.getReceivedProtocol();
+      curCodeMsg.timeReceived = millis();
+      curCodeMsg.sentPending=1;
       
-      client.publish("rfbridge/action", cstr);
-      //Serial.println(timeDiff);
+      outgoingCodeMsg = curCodeMsg;
+
       lastCodeTime = millis();
       lastCodeVal = curCodeVal;
     }
+
     mySwitch.resetAvailable();
   }
   //WIFI watchdog
@@ -486,6 +526,7 @@ void loop() {
 
   //handleDiscovery();
   
+  sendPendingMsg();
   //Timers
   long now = millis();
   
