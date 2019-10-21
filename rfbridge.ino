@@ -55,8 +55,8 @@ long nextDelayOptimizeMillis = 0;
 RCSwitch mySwitch = RCSwitch();
 
 long wifiDisconnectedMillis = 0;
-int wifiLedPin = 2;
-int mqttLedPin = 14;
+int wifiLedPin = 0;
+int mqttLedPin = 16;
 
 long modeDiscoveryRequest = -1;
 
@@ -172,6 +172,7 @@ pin = 0;  // for Arduino! Receiver on interrupt 0 => that is pin #2
 
   //MQTT
   client.setServer(mqtt_server, 1883);
+  client.setClient("rfbridge" + uniqueId)
   client.setCallback(callback);
 
   nextDelayOptimizeMillis = millis() + random(3000, 10000);
@@ -520,6 +521,7 @@ void sendKeepAliveMsg() {
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
+    digitalWrite(mqttLedPin, LOW);
     Serial.print("Attempting MQTT connection...");
     // Create a random client ID
     String clientId = "ESP8266Client-";
@@ -527,6 +529,7 @@ void reconnect() {
     // Attempt to connect
     if (client.connect(clientId.c_str())) {
       Serial.println("connected");
+      digitalWrite(mqttLedPin, HIGH);
       // Once connected, publish an announcement...
       client.publish("rfbridge/status", "Connected to MQTT");
       // ... and resubscribe
@@ -536,6 +539,7 @@ void reconnect() {
       client.subscribe(mqtt_topic_list_devices);
       client.subscribe(mqtt_topic_list_devices_action);
     } else {
+      digitalWrite(mqttLedPin, LOW);
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
@@ -598,9 +602,15 @@ void loop() {
     }
     
   //MQTT
-    if (!client.connected()) {
+  if (!client.connected()) {
+    digitalWrite(mqttLedPin, LOW);
     reconnect();
   }
+  else
+  {
+    digitalWrite(mqttLedPin, HIGH);
+  }
+  
   client.loop();
 
   //handleDiscovery();
@@ -618,7 +628,7 @@ void loop() {
   
   if (now - nextDelayOptimizeMillis > 0)
   {
-    nextDelayOptimizeMillis = now + 180000;
+    nextDelayOptimizeMillis = now + 180000000;
     sendDiscoveryRquest();
   }
   
